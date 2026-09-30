@@ -11,6 +11,47 @@ from hevy2garmin.merge import MergeResult
 from hevy2garmin.sync import fetch_workouts, sync, sync_one_workout
 
 
+class TestMergeOnly:
+    def test_unmatched_workout_never_uploads_even_if_merge_disabled(self, sample_workout):
+        store = MagicMock()
+        store.get_pending.return_value = None
+        with patch("hevy2garmin.sync.attempt_merge", return_value=MergeResult(merged=False, fallback_reason="no match")) as merge, \
+             patch("hevy2garmin.sync.upload_fit") as upload:
+            result = sync_one_workout(
+                sample_workout,
+                cfg={"merge_mode": False, "merge_watch_strategy": "replace", "sync": {"grace_period_minutes": 0}},
+                garmin_client=MagicMock(), database=store, merge_only=True,
+            )
+        assert result.status == "merge_pending"
+        assert merge.call_args.kwargs["watch_strategy"] == "merge"
+        upload.assert_not_called()
+        store.mark_synced.assert_not_called()
+
+    def test_matching_workout_updates_existing_activity(self, sample_workout):
+        store = MagicMock()
+        store.get_pending.return_value = None
+        with patch("hevy2garmin.sync.attempt_merge", return_value=MergeResult(merged=True, activity_id=123)) as merge, \
+             patch("hevy2garmin.sync._estimate_fit_stats", return_value={"calories": 100, "avg_hr": 90}), \
+             patch("hevy2garmin.sync.upload_fit") as upload, \
+             patch("hevy2garmin.sync.delete_activity") as delete:
+            result = sync_one_workout(sample_workout, cfg={"merge_watch_strategy": "replace"},
+                                      garmin_client=MagicMock(), database=store, merge_only=True)
+        assert result.activity_id == 123
+        assert result.merged is True
+        assert merge.call_args.kwargs["watch_strategy"] == "merge"
+        upload.assert_not_called()
+        delete.assert_not_called()
+
+    def test_missing_garmin_client_never_falls_through_to_upload(self, sample_workout):
+        store = MagicMock()
+        store.get_pending.return_value = None
+        with patch("hevy2garmin.sync.upload_fit") as upload:
+            result = sync_one_workout(sample_workout, cfg={}, garmin_client=None,
+                                      database=store, merge_only=True)
+        assert result.status == "merge_pending"
+        upload.assert_not_called()
+
+
 def _iso(dt):
     return dt.isoformat()
 

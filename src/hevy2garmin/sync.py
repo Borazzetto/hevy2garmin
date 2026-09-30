@@ -305,10 +305,8 @@ def sync_one_workout(
     When ``respect_grace`` is True (autosync/cron), too-new workouts return
     ``status="deferred"`` so a watch activity can land before we upload.
 
-    When ``merge_only`` is True (webhook staged retry), a merge attempt that
-    does not land returns ``status="merge_pending"`` instead of falling back
-    to a plain FIT upload, so a later attempt can still merge once the watch
-    activity has reached Garmin Connect.
+    When ``merge_only`` is True, only update an existing Garmin activity in
+    place. An unmatched workout stays unsynced for a later retry.
 
     Raises on FIT generation / upload failures so callers can map errors.
     """
@@ -343,11 +341,11 @@ def sync_one_workout(
 
     logger.info("Syncing: %s (%s)", title, wid)
 
-    merge_mode = cfg.get("merge_mode", True)
+    merge_mode = True if merge_only else cfg.get("merge_mode", True)
     merge_overlap_pct = cfg.get("merge_overlap_pct", 70) / 100.0
     merge_max_drift_min = cfg.get("merge_max_drift_min", 20)
     merge_activity_types = set(cfg.get("merge_activity_types", ["strength_training"]))
-    merge_watch_strategy = cfg.get("merge_watch_strategy", "replace")
+    merge_watch_strategy = "merge" if merge_only else cfg.get("merge_watch_strategy", "replace")
     description_enabled = cfg.get("description_enabled", True)
     hr_fusion_on = cfg.get("hr_fusion", {}).get("enabled", True)
 
@@ -391,10 +389,7 @@ def sync_one_workout(
         merge_delete_id = merge_result.delete_after_upload
         merge_fallback = True
 
-        # merge_only: the caller (the webhook retry loop) wants a merge or
-        # nothing. Don't fall back to a plain FIT upload — leave the workout
-        # unsynced so the next attempt can merge once the watch activity has
-        # had more time to reach Garmin Connect.
+        # Keep automatic sync read/write only on a matching watch activity.
         if merge_only and not dry_run:
             logger.info(
                 "  merge_only: no mergeable Garmin watch activity yet for '%s', will retry",
@@ -403,6 +398,12 @@ def sync_one_workout(
             return SyncOneResult(status="merge_pending", merge_fallback=True)
     else:
         merge_fallback = False
+
+    # Also fail closed if Garmin is unavailable. Otherwise the code below
+    # would generate and upload a standalone FIT despite merge_only=True.
+    if merge_only and not dry_run:
+        logger.info("  merge_only: no Garmin activity to update for '%s', will retry", title)
+        return SyncOneResult(status="merge_pending", merge_fallback=merge_fallback)
 
     if merge_delete_id is not None and not dry_run:
         # Replace wants to delete the watch activity. That is only safe once the
@@ -634,6 +635,7 @@ def sync(
     fetch_all: bool = False,
     dry_run: bool = False,
     respect_grace: bool = True,
+    merge_only: bool = False,
     record_log: bool = True,
     log_trigger: str | None = None,
     **overrides: Any,
@@ -678,7 +680,7 @@ def sync(
         garmin_client = get_client(garmin_email, garmin_password, garmin_token_dir)
         logger.info("Authenticated successfully")
 
-    merge_mode = cfg.get("merge_mode", True)
+    merge_mode = True if merge_only else cfg.get("merge_mode", True)
     stats = {
         "synced": 0,
         "skipped": 0,
@@ -688,6 +690,7 @@ def sync(
         "merged": 0,
         "merge_fallback": 0,
         "deferred": 0,
+        "merge_pending": 0,
         "no_hr": 0,
         "duplicates": 0,
         "processing": 0,
@@ -732,10 +735,14 @@ def sync(
                 garmin_client=garmin_client,
                 dry_run=dry_run,
                 respect_grace=respect_grace,
+                merge_only=merge_only,
                 database=store,
             )
             if one.status == "deferred":
                 stats["deferred"] += 1
+                continue
+            if one.status == "merge_pending":
+                stats["merge_pending"] += 1
                 continue
             if one.status == "processing":
                 stats["processing"] += 1

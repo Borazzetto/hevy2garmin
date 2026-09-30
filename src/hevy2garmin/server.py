@@ -318,7 +318,7 @@ def _run_autosync() -> None:
     logger.info("Auto-sync: running scheduled sync")
     hevy_auth_failed = False
     try:
-        result = sync(limit=10, dry_run=False, record_log=False, respect_grace=True)
+        result = sync(limit=10, dry_run=False, record_log=False, respect_grace=True, merge_only=True)
     except Exception as e:
         from hevy2garmin.hevy import HevyAuthError
         if isinstance(e, HevyAuthError):
@@ -2312,7 +2312,7 @@ def _build_sync_workflow_yaml(interval_minutes: int) -> str:
         "      - name: Sync\n"
         "        env:\n"
         "          DATABASE_URL: ${{ secrets.DATABASE_URL }}\n"
-        "        run: hevy2garmin sync\n"
+        "        run: hevy2garmin sync --merge-only\n"
     )
 
 
@@ -2709,7 +2709,7 @@ def _bearer_ok(request: Request, secret: str) -> bool:
 
 
 @app.get("/api/cron/sync")
-async def cron_sync(request: Request, merge_only: bool = Query(False)):
+async def cron_sync(request: Request):
     """Vercel cron endpoint. Syncs 1 workout per invocation."""
     from fastapi.responses import JSONResponse
 
@@ -2720,15 +2720,13 @@ async def cron_sync(request: Request, merge_only: bool = Query(False)):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     # Cron/autosync — respect grace so watch activities can land first.
-    return await _sync_one_recorded(respect_grace=True, merge_only=merge_only, trigger="cron")
+    return await _sync_one_recorded(respect_grace=True, merge_only=True, trigger="cron")
 
 
 # ── Hevy webhook receiver ────────────────────────────────────────────────────
-# Hevy fires this when a workout is saved. The paired watch activity usually
-# reaches Garmin Connect a few minutes later, so the sync is staged: wait,
-# then try merge-only, and only the final attempt falls back to a plain FIT
-# upload — so a workout is never left unsynced. Retry state is in-memory
-# only; a restart drops it and auto-sync is the safety net.
+# Hevy fires this when a workout is saved. Retry the in-place merge while
+# Garmin Connect receives the watch activity; never create a standalone FIT.
+# Retry state is in-memory; the scheduled sync can try again later.
 WEBHOOK_DELAY_SECONDS = int(os.environ.get("WEBHOOK_DELAY_SECONDS", "300"))
 WEBHOOK_RETRY_INTERVAL_SECONDS = int(os.environ.get("WEBHOOK_RETRY_INTERVAL_SECONDS", "600"))
 WEBHOOK_MAX_ATTEMPTS = int(os.environ.get("WEBHOOK_MAX_ATTEMPTS", "3"))
@@ -2757,7 +2755,7 @@ async def _webhook_sync() -> None:
     for attempt in range(1, WEBHOOK_MAX_ATTEMPTS + 1):
         is_last = attempt == WEBHOOK_MAX_ATTEMPTS
         try:
-            resp = await _sync_one_recorded(merge_only=not is_last, trigger="webhook")
+            resp = await _sync_one_recorded(merge_only=True, trigger="webhook")
             data = json.loads(bytes(resp.body))
         except Exception as e:
             logger.error("Webhook sync attempt %d/%d failed: %s",
@@ -2784,27 +2782,13 @@ async def _webhook_sync() -> None:
 async def _webhook_sync_serverless():
     """Handle the webhook without background work, for serverless deployments.
 
-    There is no "later" here: the process stops at the response, so the staged
-    retry cannot run. What is safe to do instead depends on the watch merge:
-
-    - Merge on (the default): the watch activity has almost certainly not
-      reached Garmin Connect yet. Uploading now produces exactly the duplicate
-      the merge exists to prevent, and there is no second attempt to wait for,
-      so hand the workout to the platform cron and only say so.
-    - Merge off: nothing is being waited for, so sync immediately — which is
-      the whole point of a webhook, and a large win over a daily cron.
+    There is no "later" here: the process stops at the response, so leave
+    the workout to the scheduled merge-only sync after the watch upload lands.
     """
     from fastapi.responses import JSONResponse
 
-    if load_config().get("merge_mode", True):
-        logger.info(
-            "Hevy webhook received on a serverless deployment with the watch merge on — "
-            "leaving it to the scheduled sync so the watch activity can land first"
-        )
-        return JSONResponse({"status": "deferred", "reason": "no background work; cron will sync"})
-
-    logger.info("Hevy webhook received — syncing now (watch merge off, nothing to wait for)")
-    return await _sync_one_recorded(respect_grace=False, trigger="webhook")
+    logger.info("Hevy webhook received on serverless — leaving merge to scheduled sync")
+    return JSONResponse({"status": "deferred", "reason": "no background work; cron will sync"})
 
 
 @app.post("/api/cron/webhook")

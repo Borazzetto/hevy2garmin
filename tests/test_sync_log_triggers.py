@@ -132,6 +132,19 @@ class TestCronIsRecorded:
         client.get("/api/cron/sync")
         assert seen["respect_grace"] is True
 
+    def test_cron_always_uses_merge_only(self, client, recorded, monkeypatch):
+        from hevy2garmin import server
+        from fastapi.responses import JSONResponse
+
+        seen = []
+        async def _fake(**kw):
+            seen.append(kw["merge_only"])
+            return JSONResponse({"synced": 0, "merge_pending": 1})
+
+        monkeypatch.setattr(server, "_do_sync_one", _fake)
+        client.get("/api/cron/sync?merge_only=false")
+        assert seen == [True]
+
     def test_sync_now_still_bypasses_grace(self, client, recorded, monkeypatch):
         from hevy2garmin import server
 
