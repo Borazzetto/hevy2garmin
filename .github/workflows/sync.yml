@@ -25,4 +25,4 @@ jobs:
       - name: Sync
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: hevy2garmin sync
+        run: hevy2garmin sync --merge-only
