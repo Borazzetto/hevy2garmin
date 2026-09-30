@@ -133,9 +133,7 @@ class TestInFlightCap:
 
 
 class TestWebhookWorker:
-    """Staged retry semantics: all but the last attempt are merge_only, so a
-    workout is uploaded plainly only once the watch activity clearly is not
-    coming; the last attempt does a full sync so nothing is left unsynced."""
+    """Every automatic retry must be merge-only, including the final one."""
 
     def _run(self, responses: list[dict]) -> list[bool]:
         from hevy2garmin import server
@@ -154,10 +152,10 @@ class TestWebhookWorker:
             asyncio.run(server._webhook_sync())
         return calls
 
-    def test_merge_only_until_last_attempt(self) -> None:
+    def test_merge_only_on_every_attempt(self) -> None:
         pending = {"synced": 0, "merge_pending": True, "done": False}
-        calls = self._run([pending, pending, {"synced": 1, "done": True}])
-        assert calls == [True, True, False]
+        calls = self._run([pending, pending, pending])
+        assert calls == [True, True, True]
 
     def test_stops_after_first_successful_sync(self) -> None:
         calls = self._run([{"synced": 1, "done": True}])
@@ -177,7 +175,7 @@ class TestWebhookWorker:
         """
         busy = {"error": "Sync already running", "busy": True}
         calls = self._run([busy, busy, {"synced": 1, "done": True}])
-        assert calls == [True, True, False]
+        assert calls == [True, True, True]
 
     def test_a_raising_attempt_stops_the_worker(self) -> None:
         from hevy2garmin import server
@@ -242,8 +240,8 @@ class TestServerlessDeployment:
         assert resp.json()["status"] == "deferred"
         assert called == []
 
-    def test_with_the_watch_merge_off_it_syncs_inline(self, vercel_client) -> None:
-        """Nothing to wait for, so the webhook delivers its actual benefit."""
+    def test_with_the_watch_merge_off_it_still_defers(self, vercel_client) -> None:
+        """A saved setting cannot make the webhook upload a standalone FIT."""
         from hevy2garmin import server
 
         called = []
@@ -260,8 +258,8 @@ class TestServerlessDeployment:
                 "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
             )
         assert resp.status_code == 200
-        assert resp.json()["synced"] == 1
-        assert called == [{"respect_grace": False, "trigger": "webhook"}]
+        assert resp.json()["status"] == "deferred"
+        assert called == []
 
     def test_auth_is_still_enforced_on_serverless(self, vercel_client) -> None:
         assert vercel_client.post("/api/cron/webhook").status_code == 401
