@@ -144,6 +144,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         since=args.since,
         fetch_all=args.all,
         dry_run=args.dry_run,
+        merge_only=args.merge_only,
         **overrides,
     )
 
@@ -412,6 +413,7 @@ def main() -> None:
     sync_parser.add_argument("--since", help="Sync workouts after this date (YYYY-MM-DD)")
     sync_parser.add_argument("--all", action="store_true", help="Sync entire history")
     sync_parser.add_argument("--dry-run", action="store_true", help="Generate FIT files without uploading")
+    sync_parser.add_argument("--merge-only", action="store_true", help="Only enrich a matching Garmin activity; never upload a new activity")
 
     # sync-routines
     routines_parser = subparsers.add_parser(
