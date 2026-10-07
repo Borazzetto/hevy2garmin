@@ -508,7 +508,15 @@ If you start a **Strength Training** activity on your Garmin watch when you hit 
 - **Correct Strava timestamps** (watch-synced activities use the real time, not upload time)
 - **Single activity** on Garmin (no duplicate)
 
-If no matching watch activity is found, hevy2garmin falls back to the default flow automatically. Matching requires 70% temporal overlap with a Strength Training activity within 20 minutes of the Hevy workout start time.
+Automatic sync uses merge-only: if no watch activity matches, the Hevy workout waits for a later retry rather than creating another activity. Matching requires 70% temporal overlap with a Strength Training activity within 20 minutes of the Hevy workout start time.
+
+### Hevy details on existing Strava activities
+
+An in-place Garmin enhancement does not directly update the activity already sent to Strava. The optional Strava connection updates that existing activity's title and appends a Hevy exercise summary to its description. It never uploads, replaces or deletes activities and does not change watch heart rate, calories or duration. Structured Strava exercise tables are not supported by this integration.
+
+Register your own Strava API application at `https://www.strava.com/settings/api` and set its Authorization Callback Domain to your dashboard's hostname. Configure `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET` and `STRAVA_REDIRECT_URI` (the full HTTPS URL ending in `/strava/callback`) on the dashboard. Set `H2G_PASSWORD` or `H2G_PASSWORD_HASH` to protect account connection. GitHub Actions also needs the same Strava client ID and secret to refresh the tokens stored in the shared database.
+
+Open Settings and select **Connect Strava**, granting activity read and write permissions. The tokens persist in the installation database and refresh automatically. **Update recent Strava activities now** backfills recent Garmin merges; automatic dashboard, cron and CLI syncs retry recent merges as well. The scan covers the 50 most recently synced workouts, updating at most five per run. Only a unique exact `garmin_push_<Garmin activity ID>` match can be changed; absent or ambiguous matches wait. Personal description notes are preserved around a clearly marked Hevy block, and later manual title edits are preserved. The first update saves the original title and description in the database.
 
 ### Non-strength watch activities (climbing, etc.)
 
