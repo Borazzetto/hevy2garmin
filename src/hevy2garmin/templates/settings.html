@@ -45,6 +45,19 @@
     <h1>Settings</h1>
 </div>
 
+<div class="card section">
+    <span class="card-title">Strava · Hevy workout details</span>
+    <p class="section-description">Add the Hevy title and exercise summary to the existing Garmin activity on Strava. Heart rate, calories and duration stay with the watch recording. No new activity is created.</p>
+    {% if strava_connected %}
+    <p>Strava connected. Recent merged workouts are checked on every automatic sync.</p>
+    <form method="post" action="/api/strava/sync"><button class="btn btn-primary" type="submit">Update recent Strava activities now</button></form>
+    {% elif strava_ready %}
+    <form method="post" action="/api/strava/connect"><button class="btn btn-primary" type="submit">Connect Strava</button></form>
+    {% else %}
+    <p class="section-description">Strava connection has not been configured for this installation.</p>
+    {% endif %}
+</div>
+
 <form method="post" action="/settings">
     <!-- Credentials Section -->
     <div class="card section">
