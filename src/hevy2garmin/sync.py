@@ -775,6 +775,10 @@ def sync(
             'Add custom mappings: hevy2garmin map "Exercise Name" --category N --subcategory N'
         )
 
+    if not dry_run:
+        from hevy2garmin.strava import sync_recent_safely
+        sync_recent_safely(store, hevy)
+
     # One-line run summary, so the container log shows the outcome even when
     # nothing synced — a silent run is indistinguishable from a dead one.
     logger.info(

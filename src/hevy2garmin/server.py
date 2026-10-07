@@ -522,7 +522,7 @@ async def check_setup(request: Request, call_next):
     # ── Dashboard auth gate ──────────────────────────────────────────────
     # When a password is set, all routes except /login and /api/cron/*
     # require a valid session cookie. Without it, redirect to /login.
-    if auth_enabled() and path not in ("/login",) and not path.startswith("/api/cron/"):
+    if auth_enabled() and path not in ("/login", "/strava/callback") and not path.startswith("/api/cron/"):
         session_cookie = request.cookies.get(SESSION_COOKIE)
         if not verify_session(session_cookie, _session_epoch()):
             if path.startswith("/api/"):
@@ -1349,6 +1349,8 @@ async def history_page(request: Request):
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     config = load_config()
+    from hevy2garmin.strava import configured, TOKEN_KEY
+    strava_connected = bool((db.get_db().get_app_config(TOKEN_KEY) or {}).get("access_token"))
     unmapped: dict[str, int] = {}
     try:
         # Use cached unmapped from DB (no Hevy API call)
@@ -1359,7 +1361,70 @@ async def settings_page(request: Request):
     merge_extra_types = ", ".join(
         t for t in config.get("merge_activity_types", ["strength_training"]) if t != "strength_training"
     )
-    return _render("settings.html", config=config, unmapped=sorted(unmapped.items(), key=lambda x: -x[1]), merge_extra_types=merge_extra_types, err=request.query_params.get("err"))
+    return _render("settings.html", config=config, unmapped=sorted(unmapped.items(), key=lambda x: -x[1]), merge_extra_types=merge_extra_types, err=request.query_params.get("err"), strava_ready=configured(), strava_connected=strava_connected)
+
+
+@app.post("/api/strava/connect")
+async def strava_connect(request: Request):
+    import hashlib
+    import secrets
+    from urllib.parse import urlencode
+    from fastapi.responses import JSONResponse
+    from hevy2garmin.strava import configured, oauth_settings
+    # Never allow anonymous visitors to bind their athlete to a shared dashboard.
+    if not auth_enabled():
+        return JSONResponse({"error": "Protect the dashboard with a password before connecting Strava"}, status_code=403)
+    if not configured():
+        return JSONResponse({"error": "Configure STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET and STRAVA_REDIRECT_URI"}, status_code=400)
+    state = secrets.token_urlsafe(32)
+    db.get_db().set_app_config("strava_state_" + hashlib.sha256(state.encode()).hexdigest(), {"expires": time.time() + 600})
+    settings = oauth_settings()
+    url = "https://www.strava.com/oauth/authorize?" + urlencode({
+        "client_id": settings["client_id"], "redirect_uri": settings["redirect_uri"],
+        "response_type": "code", "approval_prompt": "force",
+        "scope": "activity:read_all,activity:write", "state": state,
+    })
+    response = RedirectResponse(url, status_code=303)
+    response.set_cookie("strava_state", state, httponly=True, secure=is_https(request), samesite="lax", max_age=600)
+    return response
+
+
+@app.get("/strava/callback")
+async def strava_callback(request: Request):
+    import hashlib
+    from fastapi.responses import JSONResponse
+    from hevy2garmin.strava import exchange_token
+    state = request.query_params.get("state", "")
+    cookie = request.cookies.get("strava_state", "")
+    if not state or not cookie or not hmac.compare_digest(state, cookie):
+        return JSONResponse({"error": "Invalid Strava authorization state"}, status_code=400)
+    store = db.get_db()
+    key = "strava_state_" + hashlib.sha256(state.encode()).hexdigest()
+    if (store.get_app_config(key) or {}).get("expires", 0) <= time.time():
+        return JSONResponse({"error": "Strava authorization expired"}, status_code=400)
+    store.set_app_config(key, {})
+    scope = set(request.query_params.get("scope", "").split(","))
+    code = request.query_params.get("code")
+    if not code or not {"activity:read_all", "activity:write"} <= scope:
+        return JSONResponse({"error": "Strava read and write permissions are required"}, status_code=400)
+    try:
+        await run_in_threadpool(exchange_token, store, grant_type="authorization_code", code=code)
+    except Exception:
+        return JSONResponse({"error": "Could not connect Strava. Please try again."}, status_code=400)
+    response = RedirectResponse("/settings", status_code=303)
+    response.delete_cookie("strava_state")
+    return response
+
+
+@app.post("/api/strava/sync")
+async def strava_sync():
+    from fastapi.responses import JSONResponse
+    from hevy2garmin.hevy import HevyClient
+    from hevy2garmin.strava import sync_recent_safely
+    if not auth_enabled():
+        return JSONResponse({"error": "Protect the dashboard with a password before updating Strava"}, status_code=403)
+    result = await run_in_threadpool(sync_recent_safely, db.get_db(), HevyClient(api_key=load_config().get("hevy_api_key")), limit=1)
+    return JSONResponse(result)
 
 
 @app.post("/settings")
@@ -2312,6 +2377,9 @@ def _build_sync_workflow_yaml(interval_minutes: int) -> str:
         "      - name: Sync\n"
         "        env:\n"
         "          DATABASE_URL: ${{ secrets.DATABASE_URL }}\n"
+        "          STRAVA_CLIENT_ID: ${{ secrets.STRAVA_CLIENT_ID }}\n"
+        "          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}\n"
+        "          STRAVA_REDIRECT_URI: ${{ secrets.STRAVA_REDIRECT_URI }}\n"
         "        run: hevy2garmin sync --merge-only\n"
     )
 
@@ -2571,6 +2639,8 @@ async def _do_sync_one(*, respect_grace: bool = False, merge_only: bool = False)
     hevy = HevyClient(api_key=hevy_api_key)
 
     # Find first unsynced workout, paginating through recent history
+    from hevy2garmin.strava import sync_recent_safely
+    await run_in_threadpool(sync_recent_safely, db.get_db(), hevy, limit=1)
     total_count = hevy.get_workout_count()
     # Cache total for dashboard
     _db = db.get_db()
